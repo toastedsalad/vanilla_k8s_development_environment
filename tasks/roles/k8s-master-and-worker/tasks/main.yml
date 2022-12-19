@@ -1,0 +1,188 @@
+---
+
+- name: Install conainerd and docker
+  apt: 
+    name: ['containerd=1.5.5-0ubuntu3~18.04.2', 'docker.io=20.10.7-0ubuntu5~18.04.3']
+    force: yes
+  tags:
+      - setup-docker
+
+- name: Create dockergroup
+  group:
+    name=docker
+    state=present
+    system=yes
+
+- name: Setup the docker user
+  user:
+    name={{item.name}}
+    groups=docker
+  with_items: "{{ docker_users }}"
+  tags:
+      - setup-docker
+
+- name: Source docker group
+  shell: |
+          newgrp docker
+  tags:
+      - setup-docker
+
+- name: Add kubernetes repo key
+  shell: |
+          curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+  tags:
+      - setup-k8s
+
+- name: Create kubernetes repo file
+  file:
+    path: "/etc/apt/sources.list.d/kubernetes.list"
+    state: "touch"
+  tags:
+      - setup-k8s
+
+- name: Add K8s Source
+  blockinfile:
+    path: "/etc/apt/sources.list.d/kubernetes.list"
+    block: |
+          deb https://apt.kubernetes.io/ kubernetes-xenial main
+  tags:
+      - setup-k8s
+
+- name: Install k8s
+  apt: 
+    update_cache: yes
+    name: ['kubelet=1.25.3-00', 'kubeadm=1.25.3-00', 'kubectl=1.25.3-00']
+    force: yes
+    state: latest
+  tags:
+      - setup-k8s
+
+- name: Disable swap for current session
+  command: swapoff -a
+  become: true
+  tags:
+      - setup-system
+
+- name: Disable swap permanently, persist reboots
+  replace:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+    replace: '#\1\2\3swap\4'
+    backup: yes
+  tags:
+      - setup-system
+
+- name: Add the overlay module
+  modprobe:
+    name: overlay
+    state: present
+  tags:
+      - setup-system
+
+- name: Add the overlay module
+  modprobe:
+    name: br_netfilter
+    state: present
+  tags:
+      - setup-system
+
+- sysctl:
+    name: net.bridge.bridge-nf-call-ip6tables
+    value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  tags:
+      - setup-system
+
+- sysctl:
+    name: net.bridge.bridge-nf-call-iptables
+    value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  tags:
+      - setup-system
+
+- sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  tags:
+      - setup-system
+
+- name: Restart containerd
+  service: 
+      name=containerd 
+      state=restarted
+  tags:
+      - setup-system
+
+- name: Start the cluster
+  shell: |
+          sudo kubeadm init --pod-network-cidr=192.168.1.0/24 --cri-socket unix:///run/containerd/containerd.sock
+  tags:
+      - configure-k8s
+  ignore_errors: yes
+
+- name: Create a directory if it does not exist
+  file:
+    path: /home/{{item.name}}/.kube
+    state: directory
+  with_items: "{{ docker_users }}"
+  tags:
+      - configure-k8s
+
+- name: Add read permission to kub conf
+  file:
+    path: /etc/kubernetes/admin.conf
+    mode: o+r
+  tags:
+      - configure-k8s
+
+- name: Copy file and change owner
+  become: True
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/{{item.name}}/.kube/config
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+  with_items: "{{ docker_users }}"
+  tags:
+      - configure-k8s
+
+- name: Remove read permission from k8s conf
+  file:
+    path: /etc/kubernetes/admin.conf
+    mode: o-r
+  tags:
+      - configure-k8s
+
+- name: Start tigera operator
+  become_user: "{{ item.name }}"
+  shell: |
+          kubectl create -f {{ role_path }}/files/tigera-operator.yml
+  ignore_errors: yes
+  with_items: "{{ docker_users }}"
+  tags:
+      - configure-k8s
+
+- name: Configure network
+  become_user: "{{ item.name }}"
+  shell: |
+          kubectl create -f {{ role_path }}/files/custom-resources.yml
+  ignore_errors: yes
+  with_items: "{{ docker_users }}"
+  tags:
+      - configure-k8s
+
+- name: Run local registry
+  become_user: "{{ item.name }}"
+  shell: |
+          docker run -d -p 5500:5000 --restart=always --name registry registry:2
+  ignore_errors: yes
+  with_items: "{{ docker_users }}"
+  tags:
+      - configure-registry

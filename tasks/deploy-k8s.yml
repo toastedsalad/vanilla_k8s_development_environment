@@ -1,0 +1,6 @@
+---
+# ansible-playbook -i hosts/default-hosts tasks/deploy-k8s.yml
+- hosts: local
+  become: yes
+  roles:
+    - { role: k8s-master-and-worker }
